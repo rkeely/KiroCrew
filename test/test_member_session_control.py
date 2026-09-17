@@ -62,9 +62,7 @@ class TestMemberCallerPredicate:
         chat = _slot("chat-10-1789623359")
         chat.memory_store = "member-kirocrew-conductor-deadbeef"
         state = _State({chat.key: chat})
-        monkeypatch.setattr(
-            sc, "_store_is_member_owned", lambda store: store.startswith("member-")
-        )
+        monkeypatch.setattr(sc, "_store_is_member_owned", lambda store: store.startswith("member-"))
         assert sc._member_caller(state, chat.key)
 
     def test_chat_slot_bound_to_a_non_member_store_is_not(self, monkeypatch):
@@ -908,9 +906,7 @@ class TestMemberChatSlotCallerFence:
         return s
 
     def _member_store(self, monkeypatch):
-        monkeypatch.setattr(
-            sc, "_store_is_member_owned", lambda store: store == _CONDUCTOR_STORE
-        )
+        monkeypatch.setattr(sc, "_store_is_member_owned", lambda store: store == _CONDUCTOR_STORE)
 
     def test_chat_slot_member_controls_its_own_worker_with_switch_off(self, monkeypatch):
         self._member_store(monkeypatch)
