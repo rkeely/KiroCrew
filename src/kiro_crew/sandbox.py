@@ -455,6 +455,19 @@ _CREW_READONLY_LEAVES: tuple[str, ...] = (
     # an owner address-bar launch. The gateway installer runs outside the agent
     # sandbox, so it can still replace the managed copy.
     "playwright-cli",
+    # The cloud launcher's config. In-sandbox code READS it (``cli_cloud`` and the
+    # provisioner selector both call ``CloudConfig.load()``), and a WRITE would let an
+    # agent choose the container image a Fargate launch runs -- the task's execution
+    # role delivers the model credential into that image before it starts, so a
+    # rewritten ``fargate.image`` turns the owner's next launch into credential
+    # delivery to an image the owner never chose. The digest rule constrains the
+    # reference's FORM, not who owns the registry, so it is no obstacle. Same
+    # both-layers treatment ``playwright-cli`` gets, for the reason the READONLY note
+    # gives: ``is_sensitive_write_path`` covers the leaf on the file-tool path, while
+    # a sandboxed shell's ``open(..., "w")`` reaches it however the write is spelled,
+    # and only a kernel denial holds there. The gateway runs outside this sandbox, so
+    # ``CloudConfig.save()`` and the wizard still write it.
+    "cloud.json",
     # The app dev-mode AUTHORIZATION record (operator grants binding each dev
     # app to its resolved ui root — see apps/dev_mode.py). Sealing it makes
     # "operator, not agent" kernel-enforced: a sandboxed process cannot mint,
@@ -943,6 +956,15 @@ _CREW_PRECREATE_READONLY_DIR_LEAVES: tuple[str, ...] = (
 #: replaceable, which would let an agent choose the executable the gateway runs.
 _CREW_NOFOLLOW_READONLY_DIR_LEAVES: tuple[str, ...] = ("playwright-cli",)
 assert set(_CREW_NOFOLLOW_READONLY_DIR_LEAVES) <= set(_CREW_PRECREATE_READONLY_DIR_LEAVES)
+#: Read-only FILE leaves whose NAME must remain the sealed name, for the same reason
+#: as the directory list above and needing its own entry because the file loop below
+#: only WARNS on an alias where the directory loop REFUSES. A bind mount seals the
+#: link's REFERENT, so a leaf that resolves leaves the lexical name replaceable in a
+#: writable parent: a sandboxed process unlinks it and drops its own file there, and
+#: the seal is intact around a name that now means something else. For ``cloud.json``
+#: that name decides which container image a Fargate launch runs, and the task's
+#: execution role delivers the model credential into it.
+_CREW_NOFOLLOW_READONLY_FILE_LEAVES: tuple[str, ...] = ("cloud.json",)
 _CREW_PRECREATE_READONLY_FILE_LEAVES: tuple[str, ...] = (
     "computer_use.json",
     "oauth_endpoints.json",
@@ -956,6 +978,18 @@ _CREW_PRECREATE_READONLY_FILE_LEAVES: tuple[str, ...] = (
     # (criterion 2).
     "file_delivery_consent.json",
     "settings_seeds.json",
+    # The cloud launcher's config, and the leaf where an ABSENT file is the more
+    # dangerous case: with no file there is no seal, so an agent could CREATE the
+    # whole ``fargate`` block -- its own image beside the owner's real secret ARNs --
+    # and the owner's next launch would deliver the model credential into it.
+    # Criterion 1: ``CloudConfig.load()`` returns the same defaults for ``{}`` as for
+    # an absent or unparseable file, and ``fargate_config()`` reads ``{}`` as no
+    # block, so an empty document means exactly what an absent one means.
+    # Criterion 2: a stale sealed read fails toward refusal. A pinned ``{}`` leaves a
+    # sandboxed reader seeing no Fargate block and no saved profile even after the
+    # operator writes one, so the lane stays UNREGISTERED and an in-sandbox launch
+    # reads as unconfigured -- narrower than the truth, never wider.
+    "cloud.json",
     # The fork-lineage sidecar satisfies both criteria the way
     # ``file_delivery_consent.json`` does: ``agent_state._read`` returns ``{}``
     # for absent, unreadable, AND an empty document alike, so a pre-created
@@ -1307,6 +1341,53 @@ def _require_real_dir_nofollow(target: str) -> None:
         )
 
 
+def _require_real_file_nofollow(target: str) -> None:
+    """Confirm *target* is a lone regular file, else refuse. For strict file leaves only.
+
+    The file analogue of :func:`_require_real_dir_nofollow`, and stricter than
+    :func:`_warn_if_alias_backed` on purpose. That function only WARNS about the two
+    shapes an ``MS_RDONLY`` bind cannot cover -- a symlink whose NAME stays replaceable,
+    and a regular file carrying a second hardlink whose alias sits outside the mount --
+    because refusing them for every ceiling would turn an ordinary dotfile manager or
+    snapshot tool into a hard spawn failure, a wider blast radius than the exposure.
+
+    That trade is right for a ceiling whose worst case is a stale policy, and wrong for
+    ``cloud.json``: a write through an unsealed alias picks the container image a
+    Fargate launch runs, and the task's execution role delivers the model credential
+    into it. Unbounded and unrecoverable beats the inconvenience of refusing a
+    hardlinked config, so the one strict leaf refuses where the rest warn. Callers keep
+    using :func:`_warn_if_alias_backed` for every other leaf.
+    """
+    try:
+        info = os.lstat(target)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise SandboxCeilingUnsealable(
+            f"cannot stat the strict governance ceiling {target}: {exc}"
+        ) from exc
+    if stat.S_ISLNK(info.st_mode):
+        pointed_at = "(unreadable)"
+        with contextlib.suppress(OSError):
+            pointed_at = os.readlink(target)
+        raise SandboxCeilingUnsealable(
+            f"the strict governance ceiling {target} is a SYMLINK -> {pointed_at}. The seal "
+            "binds the file it resolves to while the link name stays in a writable "
+            "directory, so a sandboxed process could replace the name. Remove or repoint it."
+        )
+    if not stat.S_ISREG(info.st_mode):
+        raise SandboxCeilingUnsealable(
+            f"cannot seal {target}: it is not a regular file, so the read-only bind would "
+            "not cover what a reader resolves there"
+        )
+    if info.st_nlink > 1:
+        raise SandboxCeilingUnsealable(
+            f"the strict governance ceiling {target} has {info.st_nlink} hardlinks. A bind "
+            "mount seals a MOUNT, not an inode, so a write through the other name reaches "
+            "the very inode this ceiling exposes. Break the extra link before launching."
+        )
+
+
 def _publish_empty_ceiling(
     target: str, parent: str, content: bytes = _EMPTY_CEILING_DOCUMENT
 ) -> bool:
@@ -1437,9 +1518,17 @@ def _materialize_sealable_ceilings() -> list[str]:
 
     for target in file_targets:
         parent = os.path.dirname(target)
+        strict_nofollow = os.path.basename(target) in _CREW_NOFOLLOW_READONLY_FILE_LEAVES
         _refuse_if_dangling_symlink(target)
         if os.path.exists(target):
-            _warn_if_alias_backed(target)
+            if strict_nofollow:
+                # Supersedes the warn rather than skipping it: this refuses the symlink
+                # shape AND the hardlink-alias shape, and the alias half is detection the
+                # warn was the only source of. A strict leaf must not be reachable
+                # through a name the read-only bind does not cover.
+                _require_real_file_nofollow(target)
+            else:
+                _warn_if_alias_backed(target)
             continue
         if not os.path.isdir(parent):
             continue
@@ -1454,6 +1543,11 @@ def _materialize_sealable_ceilings() -> list[str]:
                 f"cannot publish the governance ceiling {target}; it would stay writable "
                 "inside the sandbox"
             )
+        elif strict_nofollow:
+            # A competing creator won the publish. Re-check the winner without following
+            # it, exactly as the directory loop does, and on the same terms as above:
+            # a race winner that is a link or carries an alias is refused, not warned.
+            _require_real_file_nofollow(target)
 
     return created
 
