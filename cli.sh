@@ -19,6 +19,11 @@
 # updates. If the managed default cannot be provisioned (no network), the run
 # falls back to a usable system interpreter rather than failing.
 #
+# Dependencies: installed from prebuilt wheels ONLY (`pip --only-binary=:all:`),
+# so the install never needs a C compiler or -dev headers. A host no wheel of a
+# dependency can run on fails with a supported-platform message before any
+# build starts; KIROCREW_ALLOW_SOURCE_BUILDS=1 opts back into compiling.
+#
 # Options / env:
 #   --channel <nightly|insider|stable>   (default: stable; env KIROCREW_CHANNEL)
 #   --version <X.Y.Z>                    pin an exact version, verified against
@@ -127,6 +132,10 @@ Options / env:
                                        SHA-256 pin is enforced either way)
   UV_PYTHON_INSTALL_MIRROR             mirror for the python-build-standalone
                                        interpreter downloads (read by uv)
+  KIROCREW_ALLOW_SOURCE_BUILDS=1       let pip compile a dependency that has no
+                                       prebuilt wheel for this host (needs a C
+                                       toolchain and -dev headers); by default
+                                       the install refuses instead of building
 EOF
       exit 0 ;;
     *) echo "kirocrew-install: unknown argument '$1'" >&2; exit 2 ;;
@@ -136,6 +145,63 @@ FEED_BASE="${FEED_BASE%/}"
 ARTIFACT_BASE="${ARTIFACT_BASE%/}"
 
 err() { echo "kirocrew-install: $*" >&2; exit 1; }
+
+# Dependencies come from prebuilt wheels only. Left to itself, pip treats a
+# dependency with no wheel for this host as something to BUILD from its
+# sdist, and a native one (numpy, Pillow, cryptography, lxml) then needs a C
+# toolchain and -dev headers the host was never required to have; the failure
+# lands deep inside a compiler run, after the working venv has already been
+# moved aside. The managed python-build-standalone interpreter runs on
+# old-glibc distros, but each dependency's wheels carry their own glibc floor
+# (their manylinux tag), which is the part that varies per host.
+# `--only-binary=:all:` makes pip resolve the newest release of every
+# dependency that publishes a wheel this host can run, and when no release
+# does, fail before any build starts -- which _report_pip_failure turns into
+# a supported-platform message. KIROCREW_ALLOW_SOURCE_BUILDS=1 is the opt-in
+# for a host that has the toolchain and wants the compile fallback back.
+PIP_BINARY_ONLY="--only-binary=:all:"
+if [ "${KIROCREW_ALLOW_SOURCE_BUILDS:-0}" = "1" ]; then
+  PIP_BINARY_ONLY=""
+fi
+
+# "<OS> <arch>, <libc>" for the failure message. getconf answers on glibc;
+# `ldd --version` covers a libc without it (musl prints its own banner); an
+# unknown libc is simply left out rather than guessed.
+_platform_description() {
+  _plat="$(uname -s) $(uname -m)"
+  _libc="$(getconf GNU_LIBC_VERSION 2>/dev/null || true)"
+  if [ -z "$_libc" ] && command -v ldd >/dev/null 2>&1; then
+    _libc="$(ldd --version 2>&1 | head -n 1 || true)"
+  fi
+  [ -n "$_libc" ] && _plat="$_plat, $_libc"
+  printf '%s' "$_plat"
+}
+
+# Report a failed pip/pipx install from its captured log ($1). The log tail
+# always goes first so pip's own words stay visible. Under binary-only
+# resolution, pip's "No matching distribution found" with a non-empty
+# "(from versions: ...)" list means releases exist but none publishes a wheel
+# this host can run (its libc is older than every candidate's manylinux
+# floor, or the arch has no wheel at all): name the platform and the
+# packages, and say what a fix looks like -- a newer host, or an explicit
+# opt-in to compile. "(from versions: none)" is the index not carrying the
+# package at all, so that case -- like a network or disk failure -- is left
+# to the caller's own message.
+_report_pip_failure() {
+  if [ -s "$1" ]; then
+    echo "----- pip output (tail) -----" >&2
+    tail -n 30 "$1" >&2
+    echo "-----------------------------" >&2
+  fi
+  [ -n "$PIP_BINARY_ONLY" ] || return 0
+  grep -q 'No matching distribution found for' "$1" 2>/dev/null || return 0
+  grep 'Could not find a version that satisfies' "$1" 2>/dev/null \
+    | grep -q 'from versions: [0-9]' || return 0
+  _missing="$(grep 'No matching distribution found for' "$1" \
+    | sed 's/.*No matching distribution found for //' | head -n 5 | tr '\n' ' ')"
+  echo "kirocrew-install: no prebuilt wheel exists for this platform ($(_platform_description)) for: ${_missing:-a required dependency}" >&2
+  echo "kirocrew-install: Kiro Crew installs prebuilt wheels only and never compiles a dependency, so this host is not a supported platform for the CLI install. Prebuilt wheels for the current dependency set need a newer Linux (Amazon Linux 2023, RHEL/Rocky 8+, Ubuntu 22.04+, Debian 12+) on x86_64/aarch64, or macOS. To compile on this host instead, install a C/C++ toolchain and the -dev headers the packages above need, then re-run with KIROCREW_ALLOW_SOURCE_BUILDS=1." >&2
+}
 
 # The channel name IS the storage path segment: publish-cli.yml writes
 # feed/<channel>/latest-cli.json and cli/<channel>/<version>/ using the literal
@@ -583,7 +649,50 @@ _KC_PREV_UMASK="$(umask)"
 umask "$(printf '%03o' "$(( $(umask) | 022 ))")"
 if command -v pipx >/dev/null 2>&1; then
   echo "Installing with pipx ..."
-  pipx install --force --python "$PY" "$WHL" >/dev/null
+  # `pipx install --force` over an EXISTING kirocrew venv is not transactional
+  # on pipx's side: its install path removes the whole venv when pip fails,
+  # so a dependency that no longer resolves (the binary-only policy turning a
+  # would-be source build into a refusal, a download that dies) would take a
+  # WORKING `kirocrew` down with it. Mirror the venv branch: move the existing
+  # pipx venv aside (a rename), let pipx build fresh, restore the original on
+  # failure, drop the backup on success. pipx's launcher symlinks point INTO
+  # that venv path, so a restored tree brings the command back with no
+  # relink. Guards: pyvenv.cfg proves the target is a venv; a symlinked venv
+  # root is left alone; if pipx cannot name its venv dir or the rename fails,
+  # fall through to the plain --force install (today's behaviour).
+  _PIPX_VENV_BACKUP=""
+  _PIPX_VENV="$(pipx environment --value PIPX_LOCAL_VENVS 2>/dev/null || true)"
+  _PIPX_VENV="${_PIPX_VENV:+${_PIPX_VENV%/}/kirocrew}"
+  if [ -n "$_PIPX_VENV" ] && [ -f "$_PIPX_VENV/pyvenv.cfg" ] && [ ! -L "$_PIPX_VENV" ]; then
+    _PIPX_VENV_BACKUP="$_PIPX_VENV.pre-rebuild.$$"
+    _n=0
+    while [ -e "$_PIPX_VENV_BACKUP" ]; do
+      _n=$((_n + 1))
+      _PIPX_VENV_BACKUP="$_PIPX_VENV.pre-rebuild.$$.$_n"
+    done
+    mv "$_PIPX_VENV" "$_PIPX_VENV_BACKUP" 2>/dev/null || _PIPX_VENV_BACKUP=""
+  fi
+  # pipx forwards --pip-args to the pip install it drives, so the binary-only
+  # policy reaches the dependency resolution here exactly as in the venv
+  # branch. The `${...:+...}` form adds the flag as one word when the policy
+  # is on and nothing at all when it is off (no empty argument for pipx to
+  # trip on). The output is captured so a failure can be explained; pipx's
+  # own words are replayed by _report_pip_failure.
+  if ! pipx install --force --python "$PY" \
+      ${PIP_BINARY_ONLY:+"--pip-args=$PIP_BINARY_ONLY"} "$WHL" \
+      > "$TMP/pip-install.log" 2>&1; then
+    _report_pip_failure "$TMP/pip-install.log"
+    if [ -n "$_PIPX_VENV_BACKUP" ] && [ -d "$_PIPX_VENV_BACKUP" ]; then
+      rm -rf "$_PIPX_VENV" 2>/dev/null || true
+      mv "$_PIPX_VENV_BACKUP" "$_PIPX_VENV" 2>/dev/null \
+        && err "installing the wheel with pipx failed (see the output above). The previous install was restored and keeps working; re-run this installer to retry." \
+        || err "installing the wheel with pipx failed and the previous install could not be restored from $_PIPX_VENV_BACKUP."
+    fi
+    err "installing the wheel with pipx failed."
+  fi
+  if [ -n "$_PIPX_VENV_BACKUP" ] && [ -d "$_PIPX_VENV_BACKUP" ]; then
+    rm -rf "$_PIPX_VENV_BACKUP" 2>/dev/null || true
+  fi
   umask "$_KC_PREV_UMASK"
   BIN="$(pipx environment --value PIPX_BIN_DIR 2>/dev/null || echo "$HOME/.local/bin")"
 else
@@ -656,12 +765,16 @@ else
   fi
   "$VENV/bin/pip" install --quiet --upgrade pip >/dev/null 2>&1 || true
   # On failure, put the pre-rebuild venv back so the previous install keeps
-  # working -- then name the retry instead of dying with a raw pip trace.
-  if ! "$VENV/bin/pip" install --quiet "$WHL"; then
+  # working -- then name the retry instead of dying with a raw pip trace. The
+  # binary-only flag is unquoted on purpose: it is one word or nothing.
+  # shellcheck disable=SC2086
+  if ! "$VENV/bin/pip" install --quiet $PIP_BINARY_ONLY "$WHL" \
+      > "$TMP/pip-install.log" 2>&1; then
+    _report_pip_failure "$TMP/pip-install.log"
     if [ -n "$_VENV_BACKUP" ] && [ -d "$_VENV_BACKUP" ]; then
       rm -rf "$VENV" 2>/dev/null || true
       mv "$_VENV_BACKUP" "$VENV" 2>/dev/null \
-        && err "installing the wheel into $VENV failed (network?). The previous install was restored and keeps working; re-run this installer to retry." \
+        && err "installing the wheel into $VENV failed (see the pip output above). The previous install was restored and keeps working; re-run this installer to retry." \
         || err "installing the wheel into $VENV failed and the previous install could not be restored from $_VENV_BACKUP. Re-run this installer to complete the install."
     fi
     err "installing the wheel into $VENV failed. Re-run this installer to complete the install; until then the previous 'kirocrew' command may be unusable."

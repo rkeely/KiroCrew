@@ -105,9 +105,28 @@ _OPENSSL_TIMEOUT_SECS = 30
 _VENV_CREATE_TIMEOUT_SECS = 120
 #: pip resolves and downloads the full dependency set into a tree that has
 #: never seen it — the same bound dep_sync uses for a cold reinstall, doubled
-#: because a shadow build also compiles any sdist fallbacks from scratch.
+#: for a slow index on a cold cache, and for the compile fallback a host can
+#: opt back into below.
 _PIP_INSTALL_TIMEOUT_SECS = 900
 _PROBE_TIMEOUT_SECS = 60
+#: Dependencies are installed from prebuilt wheels only (the same policy as
+#: cli.sh's `PIP_BINARY_ONLY`). Without it pip builds any dependency that has
+#: no wheel for this host from its sdist, which needs a C toolchain the gateway
+#: host was never required to have; with it, such a host fails fast with pip's
+#: "No matching distribution found" naming the dependency.
+_PIP_BINARY_ONLY = "--only-binary=:all:"
+#: cli.sh's opt-in for a host that has the toolchain and wants the compile
+#: fallback back; read from this (gateway) process's environment, so a service
+#: unit has to carry it for an update to honour it.
+_ALLOW_SOURCE_BUILDS_ENV = "KIROCREW_ALLOW_SOURCE_BUILDS"
+
+
+def _pip_binary_policy() -> list[str]:
+    """The pip flags that keep dependency resolution binary-only (see above)."""
+    if os.environ.get(_ALLOW_SOURCE_BUILDS_ENV, "0") == "1":
+        return []
+    return [_PIP_BINARY_ONLY]
+
 
 # Signed-but-optional, mirroring cli.sh: a breaking release adds a fleet
 # floor (`min_version`). The signature still covers it (it stays in the
@@ -793,8 +812,14 @@ def build_shadow_venv(wheel_path: Path, shadow_dir: Path, stable_link: Path | No
         )
     except (OSError, subprocess.SubprocessError):
         pass
+    # Binary-only, exactly as cli.sh installs: a dependency with no wheel for
+    # this host fails the update up front instead of being compiled from its
+    # sdist in the shadow tree (the gateway host is not required to have a C
+    # toolchain, and a half-built tree is what the sentinel cleanup exists for).
     _run(
-        [str(shadow_python), "-m", "pip", "install", "--quiet", str(wheel_path)],
+        [str(shadow_python), "-m", "pip", "install", "--quiet"]
+        + _pip_binary_policy()
+        + [str(wheel_path)],
         _PIP_INSTALL_TIMEOUT_SECS,
         "pip install into the shadow venv",
         cwd=str(shadow_dir),

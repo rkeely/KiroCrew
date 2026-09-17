@@ -1273,3 +1273,78 @@ class TestApplyWheelUpdateOrchestration:
                 expected_version="9.9.9",
             )
         assert not layout.stable_link.exists(), "a failed verification must not promote"
+
+
+class TestBinaryOnlyDependencies:
+    """The shadow install resolves dependencies from prebuilt wheels only.
+
+    A dependency with no wheel for the gateway host must fail the update up
+    front, not be compiled from its sdist inside the shadow tree: the host was
+    never required to carry a C toolchain, and the policy has to match cli.sh's
+    so an install that succeeded and its later update agree on what they will
+    accept.
+    """
+
+    @staticmethod
+    def _capture(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+        seen: list[list[str]] = []
+
+        def fake_subprocess_run(argv, *a: object, **k: object):  # type: ignore[no-untyped-def]
+            seen.append(list(argv))
+            return type("P", (), {"returncode": 0, "stdout": b"", "stderr": b""})()
+
+        monkeypatch.setattr(wheel_engine.subprocess, "run", fake_subprocess_run)
+        return seen
+
+    def test_the_wheel_install_is_binary_only(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.delenv("KIROCREW_ALLOW_SOURCE_BUILDS", raising=False)
+        seen = self._capture(monkeypatch)
+        wheel = tmp_path / "w.whl"
+
+        wheel_engine.build_shadow_venv(wheel, tmp_path / "crew-venv-1.0.0")
+
+        install = [argv for argv in seen if str(wheel) in argv]
+        assert len(install) == 1, seen
+        argv = install[0]
+        # The flag governs THIS resolution, so it sits on the install command,
+        # right before the wheel it constrains.
+        assert argv[-2:] == ["--only-binary=:all:", str(wheel)], argv
+        # The pip self-upgrade is a separate command; the policy is not smeared
+        # onto it (a pip wheel always exists, and its failure is already ignored).
+        others = [argv for argv in seen if str(wheel) not in argv]
+        assert others and all("--only-binary=:all:" not in argv for argv in others), seen
+
+    def test_the_opt_in_restores_the_compile_fallback(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("KIROCREW_ALLOW_SOURCE_BUILDS", "1")
+        seen = self._capture(monkeypatch)
+        wheel = tmp_path / "w.whl"
+
+        wheel_engine.build_shadow_venv(wheel, tmp_path / "crew-venv-1.0.0")
+
+        install = [argv for argv in seen if str(wheel) in argv]
+        assert len(install) == 1, seen
+        assert "--only-binary=:all:" not in install[0], install[0]
+        assert install[0][-1] == str(wheel)
+
+    @pytest.mark.parametrize("value", ["0", "", "true", "yes"])
+    def test_only_the_literal_one_opts_in(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        """Same contract as cli.sh's `= "1"` test: anything else keeps the policy."""
+        monkeypatch.setenv("KIROCREW_ALLOW_SOURCE_BUILDS", value)
+        assert wheel_engine._pip_binary_policy() == ["--only-binary=:all:"]
+
+    def test_policy_matches_the_installer(self) -> None:
+        """cli.sh and the engine must accept the same wheels, or an install that
+        succeeded can be followed by an update that refuses (or compiles)."""
+        cli_sh = (_REPO_ROOT / "cli.sh").read_text(encoding="utf-8")
+        flag = re.search(r'^PIP_BINARY_ONLY="([^"]+)"$', cli_sh, re.MULTILINE)
+        assert flag is not None, "cli.sh no longer declares PIP_BINARY_ONLY"
+        assert flag.group(1) == wheel_engine._PIP_BINARY_ONLY
+        assert (
+            f'"${{{wheel_engine._ALLOW_SOURCE_BUILDS_ENV}:-0}}" = "1"' in cli_sh
+        ), "cli.sh's opt-in env var differs from the engine's"

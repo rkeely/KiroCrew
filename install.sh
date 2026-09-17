@@ -14,6 +14,12 @@
 #   --mise    Use mise (https://mise.jdx.dev) for Python and Node.js
 #             instead of system package managers. Does not modify your
 #             global mise config.
+#
+# Env:
+#   KIROCREW_ALLOW_SOURCE_BUILDS=1
+#             Let pip compile a dependency that has no prebuilt wheel for this
+#             host (needs a C toolchain and -dev headers). By default the
+#             install uses prebuilt wheels only and refuses instead of building.
 # ──────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -509,12 +515,25 @@ if [ "$WITH_VOICE" -eq 1 ]; then
     detail "Including voice extras (.[voice])"
 fi
 
+# Dependencies come from prebuilt wheels only, as in cli.sh: without this pip
+# builds any dependency that lacks a wheel for this host from its sdist, and a
+# native one (numpy, Pillow) then needs a compiler and -dev headers the host
+# was never required to have. The editable kirocrew install itself is a local
+# source tree, which pip builds regardless of the flag; only the dependency
+# resolution is restricted. KIROCREW_ALLOW_SOURCE_BUILDS=1 opts back in for a
+# host that has the toolchain.
+_pip_binary_only="--only-binary=:all:"
+if [ "${KIROCREW_ALLOW_SOURCE_BUILDS:-0}" = "1" ]; then
+    _pip_binary_only=""
+fi
+
 _pip_log="$(mktemp)"
 (
     "$_venv/bin/pip" install --upgrade pip setuptools wheel 2>&1 | tail -5 > "$_pip_log"
     cd "$KIROCREW_APP_DIR"
     # Frontend already built and staged above; skip rebuild in setup.py.
-    KIROCREW_SKIP_FRONTEND=1 "$_venv/bin/pip" install -e "$_pip_target" 2>&1 | tail -20 >> "$_pip_log"
+    # shellcheck disable=SC2086
+    KIROCREW_SKIP_FRONTEND=1 "$_venv/bin/pip" install $_pip_binary_only -e "$_pip_target" 2>&1 | tail -20 >> "$_pip_log"
 ) &
 spinner $! "Installing kirocrew and dependencies…"
 if wait $!; then
@@ -535,6 +554,21 @@ else
         echo ""
         tail -10 "$_pip_log" | while IFS= read -r _line; do detail "$_line"; done
         echo ""
+    fi
+    # Under binary-only resolution this pip error, with releases listed, means
+    # none of them publishes a wheel this host can run; name the platform and
+    # the way out instead of pointing at pip. "(from versions: none)" is the
+    # index not carrying the package and keeps the generic message.
+    if [ -n "$_pip_binary_only" ] && grep -q 'No matching distribution found for' "$_pip_log" 2>/dev/null \
+        && grep 'Could not find a version that satisfies' "$_pip_log" 2>/dev/null | grep -q 'from versions: [0-9]'; then
+        _missing="$(grep 'No matching distribution found for' "$_pip_log" \
+            | sed 's/.*No matching distribution found for //' | head -n 5 | tr '\n' ' ')"
+        _libc="$(getconf GNU_LIBC_VERSION 2>/dev/null || true)"
+        die "No prebuilt wheel exists for this platform ($(uname -s) $(uname -m)${_libc:+, $_libc}) for: ${_missing}
+     Kiro Crew installs prebuilt wheels only and never compiles a dependency, so this
+     host is not a supported platform. Use a newer Linux (Amazon Linux 2023, RHEL/Rocky 8+,
+     Ubuntu 22.04+, Debian 12+) or macOS -- or install a C/C++ toolchain plus the -dev
+     headers those packages need and re-run with KIROCREW_ALLOW_SOURCE_BUILDS=1."
     fi
     die "pip install failed. Check: $_venv/bin/pip --version"
 fi
