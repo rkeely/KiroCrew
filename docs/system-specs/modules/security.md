@@ -149,8 +149,9 @@ available. Windows TCP peer attribution is an API identity check, not a substitu
 for filesystem confinement.
 
 The member DM capability check also precedes new private allocation through
-dashboard create/sync, explicit owner V1-to-V2 setup and the equivalent CLI
-commands. An unsupported gateway refuses with the existing platform/backend
+dashboard member creation, explicit owner V1-to-V2 setup and the equivalent CLI
+commands. Discovery sync creates no private store and retains V1 for new agents.
+An unsupported gateway refuses private creation with the existing platform/backend
 remedy before writing private files or changing the binding. Existing V1 edits
 and already-owned V2 management do not require a new allocation. This preflight
 does not replace the execution guard or fall back to V1.

@@ -113,7 +113,10 @@ async def _template_chat(tmp_path, monkeypatch, *, first_turn=True):
         assert response.status == 200, await response.text()
         assert TEMPLATE in (await response.json())["synced"]
     synced = KiroCrewConfig.load()
-    private_store = synced.agents[TEMPLATE].memory_store
+    assert synced.agents[TEMPLATE].memory_store == "default"
+    # The namespace collision requires an owner-created private member.
+    private_store = provision_member_memory(synced, TEMPLATE)
+    synced.save()
     assert synced.memory_stores[private_store].memory_version == 2
     assert read_private_session_store("dashboard:template-chat") is None
     return state, slot, private_store
@@ -196,9 +199,15 @@ async def test_slot_create_cannot_overwrite_later_same_name_member(tmp_path, mon
             response = await asyncio.wait_for(client.post("/api/agents/sync", json={}), 10)
             assert response.status == 200, await response.text()
             assert TEMPLATE in (await response.json())["synced"]
-            private_store = (
-                (await asyncio.to_thread(KiroCrewConfig.load)).agents[TEMPLATE].memory_store
-            )
+
+            def opt_in():
+                cfg = KiroCrewConfig.load()
+                assert cfg.agents[TEMPLATE].memory_store == "default"
+                store = provision_member_memory(cfg, TEMPLATE)
+                cfg.save()
+                return store
+
+            private_store = await asyncio.to_thread(opt_in)
 
             later_task = asyncio.create_task(
                 client.post(f"/api/chat/slots/{slot.key}/agent", json={"agent": TEMPLATE})
