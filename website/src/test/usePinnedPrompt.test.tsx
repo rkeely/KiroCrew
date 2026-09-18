@@ -136,6 +136,17 @@ function wire(h: ReturnType<typeof renderPin>, g: ReturnType<typeof mountGeometr
   })
 }
 
+/** A row whose viewport rect tracks the scroller, the way a real one does. A
+ *  fixture row with a STATIC rect reads as a destination that moves with every
+ *  write — the animated-widget shape — which is the case the converge backstop
+ *  exists for, not the normal landing. */
+function trackScroll(el: HTMLElement, contentTop: number, height: number, g: { scrollTop: number }) {
+  Object.defineProperty(el, 'getBoundingClientRect', {
+    configurable: true,
+    value: () => rect(contentTop - g.scrollTop, height),
+  })
+}
+
 describe('usePinnedPrompt (shared pinned-prompt geometry)', () => {
   it('pins the prompt above the fold, with its image sources, from live geometry', () => {
     const h = renderPin()
@@ -216,18 +227,30 @@ describe('usePinnedPrompt (shared pinned-prompt geometry)', () => {
     expect(h.result.current.pinned).toBeNull()
   })
 
-  it('glides the in-place jump to the target row minus the banner chrome', () => {
+  it('glides the in-place jump to the target row minus the banner chrome, then converges', () => {
     const h = renderPin()
     const g = mountGeometry(5)
+    trackScroll(g.rows[2], 300, 40, g)
     wire(h, g)
-    // Target row 2 sits at viewport y=100 while the scroller starts at y=0 and
-    // scrollTop=200, so the raw landing is 200 + 100 = 300 minus the chrome:
-    // fold (100) + pinPushTravel(bannerH 70 → 74) + 24px slack = 198 → 102.
+    // Target row 2 sits at content y=300 while scrollTop=200 (viewport y=100),
+    // so the raw landing is 300 minus the chrome: fold (100) +
+    // pinPushTravel(bannerH 70 → 74) + 24px slack = 198 → 102.
     act(() => { h.result.current.jumpToPinnedPromptInPlace(2) })
     expect(frames).toHaveLength(1)
     flushFrame(0)     // t=0: no movement yet
     expect(g.scrollTop).toBe(200)
-    flushFrame(600)   // past GLIDE_MS: settled at the goal
+    flushFrame(225)   // mid-travel: strictly between, i.e. a glide, not a teleport
+    expect(g.scrollTop).toBeLessThan(200)
+    expect(g.scrollTop).toBeGreaterThan(102)
+    flushFrame(600)   // past the travel: on the goal, and STILL armed
+    expect(g.scrollTop).toBe(102)
+    expect(frames).toHaveLength(1)
+    // Convergence: the goal must hold still for GLIDE_QUIET_MS across at least
+    // two frames before the loop lets go.
+    flushFrame(616)
+    flushFrame(632)
+    expect(frames).toHaveLength(1)
+    flushFrame(900)
     expect(g.scrollTop).toBe(102)
     expect(frames).toHaveLength(0)
   })
@@ -235,15 +258,17 @@ describe('usePinnedPrompt (shared pinned-prompt geometry)', () => {
   it('aborts the in-place glide on user scroll intent', () => {
     const h = renderPin()
     const g = mountGeometry(5)
+    trackScroll(g.rows[2], 300, 40, g)
     wire(h, g)
     act(() => { h.result.current.jumpToPinnedPromptInPlace(2) })
     flushFrame(0)
+    expect(frames).toHaveLength(1)
     // A wheel event is user scroll intent (attachUserScrollIntent): the glide
-    // must stop writing scrollTop and leave the reader where they are.
+    // must stop writing scrollTop, drop its queued frame and leave the reader
+    // where they are.
     act(() => { g.scroller.dispatchEvent(new Event('wheel')) })
-    flushFrame(16)
-    expect(g.scrollTop).toBe(200)
     expect(frames).toHaveLength(0)
+    expect(g.scrollTop).toBe(200)
   })
 
   it('does not throw when the target row is not mounted', () => {
@@ -302,14 +327,6 @@ describe('usePinnedPrompt push geometry is resting-height-derived', () => {
  * landing (banner clipped or dropped) this self-driven glide replaced.
  */
 describe('usePinnedPrompt in-place jump under reduced motion', () => {
-  /** A row whose viewport rect tracks the scroller, the way a real one does. */
-  function trackScroll(el: HTMLElement, contentTop: number, height: number, g: { scrollTop: number }) {
-    Object.defineProperty(el, 'getBoundingClientRect', {
-      configurable: true,
-      value: () => rect(contentTop - g.scrollTop, height),
-    })
-  }
-
   function reduceMotion() {
     Object.defineProperty(window, 'matchMedia', {
       writable: true, configurable: true,
@@ -339,13 +356,18 @@ describe('usePinnedPrompt in-place jump under reduced motion', () => {
     flushFrame(16)
     expect(g.scrollTop).toBe(52)
 
-    // Nothing moves any more, so the loop stops on its own.
+    // Nothing moves any more; the loop lets go once the goal has been quiet for
+    // GLIDE_QUIET_MS (timed from the last change at 16ms) over ≥ 2 frames.
     flushFrame(32)
+    flushFrame(48)
+    expect(g.scrollTop).toBe(52)
+    expect(frames).toHaveLength(1)
+    flushFrame(300)
     expect(g.scrollTop).toBe(52)
     expect(frames).toHaveLength(0)
   })
 
-  it('stops after GLIDE_MS when the landing never settles', () => {
+  it('stops at the converge backstop when the landing never settles', () => {
     reduceMotion()
     const h = renderPin()
     const g = mountGeometry(5)
@@ -355,7 +377,9 @@ describe('usePinnedPrompt in-place jump under reduced motion', () => {
     act(() => { h.result.current.jumpToPinnedPromptInPlace(2) })
     flushFrame(0)
     expect(frames).toHaveLength(1)
-    flushFrame(460)
+    flushFrame(1990)
+    expect(frames).toHaveLength(1)
+    flushFrame(2000)
     expect(frames).toHaveLength(0)
   })
 })

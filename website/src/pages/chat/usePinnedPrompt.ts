@@ -14,6 +14,7 @@ import {
   type PinnedPromptState,
 } from '../../utils/pinnedPrompt'
 import { attachUserScrollIntent } from '../../utils/searchScroll'
+import { glideDurationMs, runConvergingGlide } from '../../utils/convergingGlide'
 
 export interface UsePinnedPromptOptions {
   /** The transcript scroll container. Rows inside it carry `data-display-index`. */
@@ -206,70 +207,49 @@ export function usePinnedPrompt({ scrollerRef, requiresMountedHandoff = false }:
    * chat uses for its near jump: each frame re-derives the destination from
    * LIVE geometry (row rect + the banner currently pinned), so the banner swap
    * mid-glide — the previous turn's card pinning as this one un-pins — moves
-   * the landing instead of stranding it. A native smooth scroll would be
-   * cancelled by the follow controller's re-pin writes; owning every frame's
+   * the landing instead of stranding it, and convergence after the travel
+   * catches the shifts the landing itself causes. A native smooth scroll would
+   * be cancelled by the follow controller's re-pin writes; owning every frame's
    * write makes the glide uncancellable. User scroll intent aborts it.
    * A virtualized host (ChatPage) must not use this: its target row may be
-   * unmounted spacer, which is why it keeps its own mount-then-scroll jump.
+   * unmounted spacer, which is why it keeps its own estimate-steered jump.
    */
-  const jumpRafRef = useRef(0)
   const jumpCancelRef = useRef<(() => void) | null>(null)
   const jumpToPinnedPromptInPlace = useCallback((target: number) => {
-    cancelAnimationFrame(jumpRafRef.current)
     jumpCancelRef.current?.()
     const sc0 = scrollerRef.current
     if (!sc0) return
-    // Land at the head of the target's consecutive prompt run (a steer pair, a
-    // subagent fan-out) so the row on the hand-off line is a non-prompt and the
-    // previous turn's banner survives the landing — see jumpAnchorIdx.
+    // Land at the head of the target's consecutive prompt run (a steer sent
+    // before any output, a double-send) so the row on the hand-off line is a
+    // non-prompt and the previous turn's banner survives the landing — see
+    // jumpAnchorIdx.
     const anchor = jumpAnchorIdx(displayItemsRef.current, target)
     const rowEl = (): HTMLElement | null =>
       scrollerRef.current?.querySelector(`[data-display-index="${anchor}"]`) as HTMLElement | null
     if (!rowEl()) return
-    let cancelled = false
-    const detach = attachUserScrollIntent(sc0, () => { cancelled = true })
-    jumpCancelRef.current = () => { cancelled = true; detach() }
-    const GLIDE_MS = 450
-    const t0 = performance.now()
-    const from = sc0.scrollTop
-    const reduced = typeof window.matchMedia === 'function'
-      && window.matchMedia('(prefers-reduced-motion: reduce)').matches
-    const easeOutCubic = (t: number) => 1 - Math.pow(1 - t, 3)
-    // Reduced motion removes the eased TRAVEL, not the convergence. `goal` is
-    // re-derived every frame because rows mount, images load and the banner
-    // swaps DURING the jump — and the swap is caused by our own write, so it can
-    // only be seen on the frame AFTER it. Landing after a single frame therefore
-    // reads geometry that was true before those shifts, which is exactly the
-    // stale landing this self-driven glide replaced. The reduced path jumps
-    // straight to `goal` each frame and stops once `goal` has stopped moving.
-    let lastGoal: number | null = null
-    const glide = () => {
-      if (cancelled) { detach(); return }
+    const goal = (): number | null => {
       const sc = scrollerRef.current
       const row = rowEl()
-      if (!sc || !row) { detach(); jumpCancelRef.current = null; return }
+      if (!sc || !row) return null
       const liveTarget = sc.scrollTop
         + (row.getBoundingClientRect().top - sc.getBoundingClientRect().top)
         - pinnedJumpChrome()
-      const goal = Math.max(0, Math.min(sc.scrollHeight - sc.clientHeight, liveTarget))
-      if (reduced) {
-        sc.scrollTop = goal
-        const settled = lastGoal != null && Math.abs(goal - lastGoal) < 1
-        lastGoal = goal
-        // Bounded by the same GLIDE_MS the eased path spends, so a row that
-        // never stops resizing (an animated widget) cannot hold the loop open.
-        if (settled || performance.now() - t0 >= GLIDE_MS) {
-          detach(); jumpCancelRef.current = null; return
-        }
-        jumpRafRef.current = requestAnimationFrame(glide)
-        return
-      }
-      const t = Math.min(1, (performance.now() - t0) / GLIDE_MS)
-      sc.scrollTop = from + (goal - from) * easeOutCubic(t)
-      if (t >= 1) { detach(); jumpCancelRef.current = null; return }
-      jumpRafRef.current = requestAnimationFrame(glide)
+      return Math.max(0, Math.min(sc.scrollHeight - sc.clientHeight, liveTarget))
     }
-    jumpRafRef.current = requestAnimationFrame(glide)
+    const first = goal()
+    if (first == null) return
+    const reduced = typeof window.matchMedia === 'function'
+      && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    const detach = attachUserScrollIntent(sc0, () => { jumpCancelRef.current?.() })
+    const cancelGlide = runConvergingGlide({
+      goal,
+      read: () => scrollerRef.current?.scrollTop ?? 0,
+      write: (top) => { const sc = scrollerRef.current; if (sc) sc.scrollTop = top },
+      durationMs: glideDurationMs(first - sc0.scrollTop),
+      reduced,
+      onEnd: () => { detach(); jumpCancelRef.current = null },
+    })
+    jumpCancelRef.current = cancelGlide
   }, [pinnedJumpChrome, scrollerRef])
 
   return {
