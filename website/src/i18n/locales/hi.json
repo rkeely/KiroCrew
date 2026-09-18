@@ -1,4 +1,9 @@
 {
+  "appChatLaunch": {
+    "unsent": "{{error}}\n\nसंदेश नहीं भेजा गया। फिर कोशिश करने के लिए इसे कॉपी करो:\n{{message}}",
+    "cancelled": "तुमने सत्र बदला, इसलिए संदेश भेजना रद्द कर दिया गया।",
+    "targetUnavailable": "लक्षित सत्र नहीं खुल सका।"
+  },
   "appStoreSources": {
     "all": "सभी स्रोत",
     "source": "स्रोत",

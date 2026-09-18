@@ -1,4 +1,9 @@
 {
+  "appChatLaunch": {
+    "unsent": "{{error}}\n\n메시지가 전송되지 않았습니다. 복사한 후 다시 시도하세요:\n{{message}}",
+    "cancelled": "세션을 전환하여 전송이 취소되었습니다.",
+    "targetUnavailable": "대상 세션을 열 수 없습니다."
+  },
   "appStoreSources": {
     "all": "모든 출처",
     "source": "출처",

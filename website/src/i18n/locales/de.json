@@ -1,4 +1,9 @@
 {
+  "appChatLaunch": {
+    "unsent": "{{error}}\n\nNachricht nicht gesendet. Kopiere sie, um es erneut zu versuchen:\n{{message}}",
+    "cancelled": "Senden abgebrochen, weil du die Sitzung gewechselt hast.",
+    "targetUnavailable": "Die Zielsitzung konnte nicht geöffnet werden."
+  },
   "appStoreSources": {
     "all": "Alle Quellen",
     "source": "Quelle",

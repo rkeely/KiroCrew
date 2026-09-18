@@ -1,4 +1,9 @@
 {
+  "appChatLaunch": {
+    "unsent": "{{error}}\n\nবার্তা পাঠানো হয়নি। আবার চেষ্টা করতে এটি কপি করো:\n{{message}}",
+    "cancelled": "তুমি সেশন বদলেছ, তাই পাঠানো বাতিল হয়েছে।",
+    "targetUnavailable": "লক্ষ্য সেশন খোলা যায়নি।"
+  },
   "appStoreSources": {
     "all": "সব উৎস",
     "source": "উৎস",

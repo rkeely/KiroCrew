@@ -1,4 +1,9 @@
 {
+  "appChatLaunch": {
+    "unsent": "{{error}}\n\nメッセージは未送信です。コピーして再試行してください：\n{{message}}",
+    "cancelled": "セッションを切り替えたため、送信をキャンセルしました。",
+    "targetUnavailable": "送信先のセッションを開けませんでした。"
+  },
   "appStoreSources": {
     "all": "すべての配布元",
     "source": "配布元",

@@ -1,4 +1,9 @@
 {
+  "appChatLaunch": {
+    "unsent": "{{error}}\n\nMessage not sent. Copy it to try again:\n{{message}}",
+    "cancelled": "Send cancelled because you switched sessions.",
+    "targetUnavailable": "Could not open the target session."
+  },
   "appStoreSources": {
     "all": "All sources",
     "source": "Source",

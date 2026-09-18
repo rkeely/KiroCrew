@@ -1,4 +1,9 @@
 {
+  "appChatLaunch": {
+    "unsent": "{{error}}\n\nMensagem não enviada. Copie-a para tentar novamente:\n{{message}}",
+    "cancelled": "O envio foi cancelado porque você mudou de sessão.",
+    "targetUnavailable": "Não foi possível abrir a sessão de destino."
+  },
   "appStoreSources": {
     "all": "Todas as fontes",
     "source": "Fonte",

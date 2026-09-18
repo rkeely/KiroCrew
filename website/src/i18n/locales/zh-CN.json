@@ -1,4 +1,9 @@
 {
+  "appChatLaunch": {
+    "unsent": "{{error}}\n\n消息未发送。复制以下内容后重试：\n{{message}}",
+    "cancelled": "你切换了会话，发送已取消。",
+    "targetUnavailable": "无法打开目标会话。"
+  },
   "appStoreSources": {
     "all": "所有来源",
     "source": "来源",
